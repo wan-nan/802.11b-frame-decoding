@@ -1,0 +1,2860 @@
+rame to decode them
+
+% You may add preparation code here
+
+filename='myframes.pcap';
+
+write_pcap_header(filename);
+
+for frame=1:size(frame_boundary,2)
+    fprintf('\n Decoding frame %d\n',frame);
+    frame_data=despread_data(frame_boundary(1,frame):frame_boundary(2,frame));
+
+    % Step 4: Decode the DBPSK signal
+    raw_bits = decode_dbpsk(frame_data);
+    
+    % Step 5: Descramble the raw bits to get the real bits
+    frame_bits = descramble (raw_bits);
+    
+    % Step 6: Find the SYNC and remove them
+    sfd_start = find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge detector to find sharp edges
+thr=conv(abs(data),filter2)*0.8; % the threshod determined by moving average
+
+posedge=(sign(temp-thr)+1)/2; % find the postive edge, magnitude jump up
+negedge=-(sign(temp+thr)-1)/2; % find the negative edge, magnitude jump down
+pos=find(posedge);
+neg=find(negedge);
+j=1;
+pstart=1;
+pend=1;
+f_boundary=zeros(2,1);
+% scan posedge and negative edge to find boundaries
+while (pstart<size(pos,2) && pend<size(neg,2))  
+    while(neg(pend)<pos(pstart) && pend<size(neg,2))
+        pend=pend+1;
+    end
+    %only retain frames longer than 1000 bits
+    if(neg(pend)-pos(pstart)>1000&&pos(pstart+1)-pos(pstart)>1000&&pos(pstart+1)>neg(pend))
+        f_boundary(1,j)=pos(pstart)+length(filter); 
+        f_boundary(2,j)=neg(pend)-length(filter);
+        j=j+1;
+    end
+    pstart=pstart+1;
+end
+%remove the first frame and last frame, may be partial frames
+f_boundary=f_boundary(:,2:end-1);
+end%File start find_preamble.m
+function sfd_start = find_preamble(data)
+%function find_preamble: find the preamble in the frame data
+%input: data  descrambled bit sequence
+%output: sfd_start: the poistion of the first sfd bit, if cannot find the
+%                   sfd, set sfd_start=0
+
+max_headersize=200;
+%% You should write your own code to find the preamble
+position=1;
+while(position<max_headersize)
+    index=find(data(position:end)==1,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    position=position+index;
+    index=find(data(position:end)==0,1,'first');
+    if(isempty......d2.A@@@$. ..".90.F.z..............Vbv.@@@@@@@@.....v.@@@@....@@@@..P.....|b``R.@@@@@@@@........z........V.....Zbv.@@@@@@@@.....v
+    end
+end
+if(position<max_headersize)
+    sfd_start=position;
+else
+    sfd_start=0;
+end
+
+end
+
+%file end
+
+%File start load_baseband
+function [count,baseband]=load_baseband(filename,start,num)
+%load the uint16 USRP rx_sample_to_file dumpfile
+%input:
+%  -filename: the dumpfile
+%  -start: the number of samples to skip at the start
+%  -num: the number of samples to read, use inf if read all data
+%output:
+%  -count: the number of read samples
+%  -loadtrace16: the complex sample data;
+
+fd=fopen(filename,'r');
+fseek(fd,start*4,-1);
+temp=fread(fd,[2 num],'*int16');
+baseband=complex(double(temp(1,:)),double(temp(2,:)));
+count=length(baseband);
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_frame
+function write_pcap_frame(filename,data,offset)
+% Write the bit stream into the filename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrite(fd,magicnumber,'uint32');
+v_major=2;
+v_minor=4;
+fwrite(fd,v_major,'uint16');
+fwrite(fd,v_minor,'uint16');
+this_zone=0;
+fwrite(fd,this_zone,'uint32');
+sigfigs=0;
+fwrite(fd,sigfigs,'uint32');
+snaplen=32768
+fwrite(fd,snaplen,'uint32');
+network=105
+fwrite(fd,network,'uint32');
+fclose(fd);
+
+
+end
+
+%file end
+
+
+
+%file start bitohexstr.m
+function result=bittohexstr(data)
+% function bittohexstr: change bits to hex strings
+% input: data: raw bits
+% output: result: the Captalized HEX result
+
+%% you must write your own code here
+
+result=[];
+for i=1:8:floor(length(data)/8)*8
+    result=[dec2hex(sum(data(i:i+7).*(2.^(0:7))),2) result];
+end
+end
+%file end
+
+%File start decode_dbpsk.m
+function raw_bits=decode_dbpsk(data)
+%function decode_dbpsk: decode the rawbits from the despread signal of a
+%single frame
+%input: data  -- complex valued despread signal
+%output: raw_bits -- logic valued vector contains 0 and 1 of the decoded
+%bits
+
+%% you need to write your own code to do DBPSK decoding
+
+phasechange=data(1:end-1).*conj(data(2:end));
+raw_bits=(abs(angle(phasechange))>pi/2);
+
+end
+
+
+%file end
+
+%File start decoding_main.m
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Enlarged baseband signal');
+    
+    fprintf('\n Showing magnitude of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% Step 2: Despread the baseband signal
+barker_25 = [+1, +1, -1, -1, +1, +1, +1, +1, +1, -1, -1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1]'; %25 point barker code
+
+
+
+% calculate the correlation of the barker code
+% You should fillin your own code here
+corr_result = conv(baseband_data,barker_25(end:-1:1));
+
+if(interactive)
+    figure
+    plot(real(corr_result(2e5+200:2e5+400))); %plot the enlarged real part
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Correlation results');
+    
+    fprintf('\n Showing correlation result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+% Find out the peaks in the correlation
+% You should fillin your own code here
+data_length=floor(length(corr_result)/25);
+
+%reshape the matrix to 25*data size
+shaped_corr=reshape(corr_result(1:data_length*25),25,data_length);
+%find the index of the max values
+[~,max_index]=max(abs(shaped_corr),[],1);
+
+col_index=0:25:(data_length-1)*25;
+
+despread_data=corr_result(max_index+col_index);
+
+if(interactive)
+    figure
+    plot(abs(despread_data(1:4e4))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of despreaded signal');
+    
+    fprintf('\n Showing despreaded result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+%% Step 3: Finding the start and ending of the frame
+
+frame_boundary = find_frame_boundary( despread_data );
+
+if(interactive)
+    fprintf('\n Found %d frames\n',size(frame_boundary,2));
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% loop over every frame to decode them
+
+% You may add preparation code here
+
+filename='myframes.pcap';
+
+write_pcap_header(filename);
+
+for frame=gBE...E&.."V.M..	
+....g..@@@@.......PN..@........@.....@J...NX.....Rv.@@@@..........z.............P..............PbX.....Rt.............y(2,frame));
+
+    % Step 4: Decode the DBPSK signal
+    raw_bits = decode_dbpsk(frame_data);
+    
+    % Step 5: Descramble the raw bits to get the real bits
+    frame_bits = descramble (raw_bits);
+    
+    % Step 6: Find the SYNC and remove them
+    sfd_start = find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge d. .......|.....P~...e'.........z....P...P....RX......dRT`\pv@J@...@........@..........@..@......@................zP....P....Z...RVbR^dv@J@....@...@.......@....X@.........@....@..........zZP....P....V...RZbR^dv@J@....@...@........@....X@.........@....@........z....P.......Rv....z....P.......Rv..zbv.......zbv.....zbv...........z.....PdXbRv.J@....@.......@...@........@....@..@....@................@P......x....P...XdR@LL@....x....P...XdRR@@.@@@@.....P...P....Rx...P......R@LL@....x....P...XdRR.@@@@@@@@....z....Vbv.    end
+    %only retain frames longer than 1000 bits
+    if(neg(pend)-pos(pstart)>1000&&pos(pstart+1)-pos(pstart)>1000&&pos(pstart+1)>neg(pend))
+        f_boundary(1,j)=pos(pstart)+length(filter); 
+        f_boundary(2,j)=neg(pend)-length(filter);
+        j=j+1;
+    end
+    pstart=pstart+1;
+end
+%remove the first frame and last frame, may be partial frames
+f_boundary=f_boundary(:,2:end-1);
+end%File start find_preamble.m
+function sfd_start = find_preamble(data)
+%function find_preamble: find the preamble in the frame data
+%input: data  descrambled bit sequence
+%output: sfd_start: the poistion of the first sfd bit, if cannot find the
+%                   sfd, set sfd_start=0
+
+max_headersize=200;
+%% You should write your own code to find the preamble
+position=1;
+while(position<max_headersize)
+    index=find(data(position:end)==1,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    position=position+index;
+    index=find(data(position:end)==0,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    if(index>100)
+        position=position+index-1;
+        break;
+    end
+end
+if(position<max_headersize)
+    sfd_start=position;
+else
+    sfd_start=0;
+end
+
+end
+
+%file end
+
+%File start load_baseband
+function [count,baseband]=load_baseband(filename,start,num)
+%load the uint16 USRP rx_sample_to_file dumpfile
+%input:
+%  -filename: the dumpfile
+%  -start: the number of samples to skip at the start
+%  -num: the number of samples to read, use inf if read all data
+%output:
+%  -count: the number of read samples
+%  -loadtrace16: the complex sample data;
+
+fd=fopen(filename,'r');
+fseek(fd,start*4,-1);
+temp=fread(fd,[2 num],'*int16');
+baseband=complex(double(temp(1,:)),double(temp(2,:)));
+count=length(baseband);
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_frame
+function write_pcap_frame(filename,data,offset)
+% Write the bit stream into the filename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrite(fd,magicnumber,'uint32');
+v_major=2;
+v_minor=4;
+fwrite(fd,v_major,'uint16');
+fwrite(fd,v_minor,'uint16');
+this_zone=0;
+fwrite(fd,this_zone,'uint32');
+sigfigs=0;
+fwrite(fd,sigfigs,'uint32');
+snaplen=32768
+fwrite(fd,snaplen,'uint32');
+network=105
+fwrite(fd,network,'uint32');
+fclose(fd);
+
+
+end
+
+%file end
+
+
+
+%file start bitohexstr.m
+function result=bittohexstr(data)
+% function bittohexstr: change bits to hex strings
+% input: data: raw bits
+% output: result: the Captalized HEX result
+
+%% you must write your own code here
+
+result=[];
+for i=1:8:floor(length(data)/8)*8
+    result=[dec2hex(sum(data(i:i+7).*(2.^(0:7))),2) result];
+end
+end
+%file end
+
+%File start decode_dbpsk.m
+function raw_bits=decode_dbpsk(data)
+%function decode_dbpsk: decode the rawbits from the despread signal of a
+%single frame
+%input: data  -- complex valued despread signal
+%output: raw_bits -- logic valued vector contains 0 and 1 of the decoded
+%bits
+
+%% you need to write your own code to do DBPSK decoding
+
+phasechange=data(1:end-1).*conj(data(2:end));
+raw_bits=(abs(angle(phasechange))>pi/2);
+
+end
+
+
+%file end
+
+%File start decoding_main.m
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Enlarged baseband signal');
+    
+    fprintf('\n Showing magnitude of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% Step 2: Despread the baseband signal
+barker_25 = [+1, +1, -1, -1, +1, +1, +1, +1, +1, -1, -1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1]'; %25 point barker code
+
+
+
+% calculate the correlation of the barker code
+% You should fillin your own code here
+corr_result = conv(baseband_data,barker_25(end:-1:1));
+
+if(interactive)
+    figure
+    plot(real(corr_result(2e5+200:2e5+400))); %plot the enlarged real part
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Correlation results');
+    
+    fprintf('\n Showing correlation result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+% Find out the peaks in the correlation
+% You should fillin your own code here
+data_length=floor(length(corr_result)/25);
+
+%reshape the matrix to 25*data size
+shaped_corr=reshape(corr_result(1:data_length*25),25,data_length);
+%find the index of the max values
+[~,max_index]=max(abs(shaped_corr),[],1);
+
+col_index=0:25:(data_length-1)*25;
+
+despread_data=corr_result(max_index+col_index);
+
+if(interactive)
+    figure
+    plot(abs(despread_data(1:4e4))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of despreaded signal');
+    
+    fprintf('\n Showing despreaded result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+%% Step 3: Finding the start and ending of the frame
+
+frame_boundary = find_frame_boundary( despread_data );
+
+if(interactive)
+    fprintf('\n Found %d frames\n',size(frame_boundary,2));
+    fprintf('Paused, press any ke...T@Y	.H"@g2a.$L.m.(y3..Z.@..@......NRv.@@@@.....v......JJ@....@....@.....@.....@..@......@......J@...@...@...@...........@....@..............zN........\....Nv...................P........Rv.....@.....zbt....P..............XdR.@@@@.......PN..@........@.....@J...NX.....Rv.@@@@..........z.............P..............PbX.....Rt..............PdX.....RRv..@@@@J@....@ht@......@...@.....@.......@@@@........@z@............P..........Rv.@@@@.@@@@J@....@jt@..........@...@...@....@..@...@...@....@.....@@@@..........@z@..........@P........Rv.@@@@.@@@@J@....@lt@....@...@....@...@......@.....@@@@.........@z find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge detector to find sharp edges
+thr=conv(abs(data),filter2)*0.8; % the threshod determined by moving average
+
+posedge=(sign(temp-thr)+1)/2; % find the postive edge, magnitude jump up
+negedge=-(sign(temp+thr)-1)/2; % find the negative edge, magnitude jump down
+pos=find(posedge);
+neg=find(negedge);
+j=1;
+pstart=1;
+pend=1;
+f_boundary=zeros(2,1);
+% scan posedge and negative edge to find boundaries
+while (pstart<size(pos,2) && pend<size(neg,2))  
+    while(neg(pend)<pos(pstart) && pend<size(neg,2))
+        pend=pend+1;
+    end
+    %only retain frames longer than 1000 bits
+    if(neg(pend)-pos(pstart)>1000&&pos(pstart+1)-pos(pstart)>1000&&pos(pstart+1)>neg(pend))
+        f_boundary(1,j)=pos(pstart)+length(filter); 
+        f_boundary(2,j)=neg(pend)-length(filter);
+        j=j+1;
+    end
+    pstart=pstart+1;
+end
+%remove the first frame and last frame, may be partial frames
+f_boundary=f_boundary(:,2:end-1);
+end%File start find_preamble.m
+function sfd_start = find_preamble(data)
+%function find_preamble: find the preamble in the frame data
+%input: data  descrambled bit sequence
+%output: sfd_start: the poistion of the first sfd bit, if cannot find the
+%                   sfd, set sfd_start=0
+
+max_headersize=200;
+%% You should write your own code to find the preamble
+position=1;
+while(position<max_headersize)
+    index=find(data(position:end)==1,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    position=position+index;
+    index=find(data(position:end)==0,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    if(index>100)
+        position=position+index-1;
+        break;
+    end
+end
+if(position<max_headersize)
+    sfd_start=position;
+else
+    sfd_start=0;
+end
+
+end
+
+%file end
+
+%File start load_baseband
+function [count,baseband]=load_baseband(filename,start,num)
+%load the uint16 USRP rx_sample_to_file dumpfile
+%input:
+%  -filename: the dumpfile
+%  -start: the number of samples to skip at the start
+%  -num: the number of samples to read, use inf if read all data
+%output:
+%  -count: the number of read samples
+%  -loadtrace16: the complex sample data;
+
+fd=fopen(filename,'r');
+fseek(fd,start*4,-1);
+temp=fread(fd,[2 num],'*int16');
+baseband=complex(double(temp(1,:)),double(temp(2,:)));
+count=length(baseband);
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_frame
+function write_pcap_frame(filename,data,offset)
+% Write the bit stream into the filename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrite(fd,magicnumber,'uint32');
+v_major=2;
+v_minor=4;
+fwrite(fd,v_major,'uint16');
+fwrite(fd,v_minor,'uint16');
+this_zone=0;
+fwrite(fd,this_zone,'uint32');
+sigfigs=0;
+fwrite(fd,sigfigs,'uint32');
+snaplen=32768
+fwrite(fd,snaplen,'uint32');
+network=105
+fwrite(fd,network,'uint32');
+fclose(fd);
+
+
+end
+
+%file end
+
+
+
+%file start bitohexstr.m
+function result=bittohexstr(data)
+% function bittohexstr: change bits to hex strings
+% input: data: raw bits
+% output: result: the Captalized HEX result
+
+%% you must write your own code here
+
+result=[];
+for i=1:8:floor(length(data)/8)*8
+    result=[dec2hex(sum(data(i:i+7).*(2.^(0:7))),2) result];
+end
+end
+%file end
+
+%File start decode_dbpsk.m
+function raw_bits=decode_dbpsk(data)
+%function decode_dbpsk: decode the rawbits from the despread signal of a
+%single frame
+%input: data  -- complex valued despread signal
+%output: raw_bits -- logic valued vector contains 0 and 1 of the decoded
+%bits
+
+%% you need to write your own code to do DBPSK decoding
+
+phasechange=data(1:end-1).*conj(data(2:end));
+raw_bits=(abs(angle(phasechange))>pi/2);
+
+end
+
+
+%file end
+
+%File start decoding_main.m
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Enlarged baseband signal');
+    
+    fprintf('\n Showing magnitude of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% Step 2: Despread the baseband signal
+barker_25 = [+1, +1, -1, -1, +1, +1, +1, +1, +1, -1, -1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1]'; %25 point barker code
+
+
+
+% calculate the correlation of the barker code
+% You should fillin your own code here
+corr_result = conv(baseband_data,barker_25(end:-1:1));
+
+if(interactive)
+    figure
+    plot(real(corr_result(2e5+200:2e5+400))); %plot the enlarged real part
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Correlation results');
+    
+    fprintf('\n Showing correlation result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+% Find out the peaks in the correlation
+% You should fillin your own code here
+data_length=floor(length(corr_result)/25);
+
+%reshape the matrix to 25*data size
+shaped_corr=reshape(corr_result(1:data_length*25),25,data_length);
+%find the index of the max values
+[~,max_index]=max(abs(shaped_corr),[],1);
+
+col_index=0:25:(data_length-1)*25;
+
+despread_data=corr_result(max_index+col_index);
+
+if(interactive)
+    figure
+    plot(abs(despread_data(1:4e4))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of despreaded signal');
+    
+    fprintf('\n Showing despreaded result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+%% Step 3: Finding the start and ending of the frame
+
+frame_boundary = find_frame_boundary( despread_data );
+
+if(interactive)
+    fprintf('\n Found %d frames\n',size(frame_boundary,2));
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% loop over every frame to decode them
+
+% You may add preparation code here
+
+filename='myframes.pcap';
+
+write_pcap_header(filename);
+
+for frame=1:size(frame_boundary,2)
+    fprintf('\n Decoding frame %d\n',frame);
+    frame_data=despread_data(frame_boundary(1,frame):frame_boundary(2,frame));
+
+    % Step 4: Decode the DBPSK signal
+    raw_bits = decode_dbpsk(frame_data);
+    
+    % Step 5: Descramble the raw bits to get the real bits
+    frame_bits = descramble (raw_bits);
+    
+    % Step 6: Find the SYNC and remove them
+    sfd_start = find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge detector to find sharp edges
+thr=conv(abs(data),filter2)*0.8; % the threshod determined by moving average
+
+posedge=(sign(temp-thr)+1)/2; % find the postive edge, magnitude jump up
+negedge=-(sign(temp+thr)-1)/2; % find the negative edge, magnitude jump down
+pos=find(posedge);
+neg=find(negedge);
+j=1;
+pstart=1;
+pend=1;
+f_boundary=zeros(2,1);
+% scan posedge and negative edge to find boundaries
+while (pstart<size(pos,2) && pend<size(neg,2))  
+    while(neg(pend)<pos(pstart) && pend<size(neg,2))
+        pend=pend+1;
+    end
+    %only retain frames longer than 1000 bits
+    if(neg(pend)-pos(pstart)>1000&&pos(pstart+1)-pos(pstart)>1000&&pos(pstart+1)>neg(pend))
+        f_boundary(1,j)=pos(pstart)+length(filter); 
+        f_boundary(2,j)=neg(pend)-length(filter);
+        j=j+1;
+    end
+    pstart=pstart+1;
+end
+%remove the first frame and last frame, may be partial frames
+f_boundary=f_boundary(:,2:end-1);
+end%File start find_preamble.m
+function sfd_start = find_preamble(data)
+%function find_preamble: find the preamble in the frame data
+%input: data  descrambled bit sequence
+%output: sfd_start: the poistion of the first sfd bit, if cannot find the
+%                   sfd, set sfd_start=0
+
+ma.^.h2&...&1....F . .Hp..@......@.....@....@...@....@..@....@...@.................zbv......P........x..............R.@@@@.....z....P....P........t...RzzbXbXN.....NRv.@@@@..P.......P.....RR.@@@@@@@@........z..............Vbv.@@@@@@@@.....v.@@@@....@@@@........z........V.....v.@@@@.....z....P....P........t...Rzz`XbXN.....NRv.@@@@..P.......P.....RR.@@@@@@@@........z..............Vbv.@@@@@@@@.....v.@@@@....@@@@..P.....|b``R.@@@@@@@@........z........V.....Zbv.@@@@@@@@.....v.@@@@..........P........x..............R.@@@@.........z........v......@@@@.........z`v...........J....@.....J....@.....@......................@......X.........z.............P........X.....X...R.J....@...@....bl@....@.................@.........J.....t.J@@Z........t@...@.........J@@Z.....t@...@......@..@.......@..@....@..@...@......J@@Z...t@...@......@..@.......@..@....X@...@...@..@....@...@.....J......t.J@@Z.....t@...@......@..@....@........J@@Z.........blt@...@.......@......@....v....z.....P........XN.NRv......P..X.....ThXZbRv.....z.....P..X.d@....XNT...blNRv.........z.......P......P....PbXtRRX......P....PdXtRRRv......z......P........Rv.......P..Rv......J....@.....J....@.....@.........................@................P........X....X......R.J@.....@...@...@......@....@...@.ilename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrite(fd,magicnumber,'uint32');
+v_major=2;
+v_minor=4;
+fwrite(fd,v_major,'uint16');
+fwrite(fd,v_minor,'uint16');
+this_zone=0;
+fwrite(fd,this_zone,'uint32');
+sigfigs=0;
+fwrite(fd,sigfigs,'uint32');
+snaplen=32768
+fwrite(fd,snaplen,'uint32');
+network=105
+fwrite(fd,network,'uint32');
+fclose(fd);
+
+
+end
+
+%file end
+
+
+
+%file start bitohexstr.m
+function result=bittohexstr(data)
+% function bittohexstr: change bits to hex strings
+% input: data: raw bits
+% output: result: the Captalized HEX result
+
+%% you must write your own code here
+
+result=[];
+for i=1:8:floor(length(data)/8)*8
+    result=[dec2hex(sum(data(i:i+7).*(2.^(0:7))),2) result];
+end
+end
+%file end
+
+%File start decode_dbpsk.m
+function raw_bits=decode_dbpsk(data)
+%function decode_dbpsk: decode the rawbits from the despread signal of a
+%single frame
+%input: data  -- complex valued despread signal
+%output: raw_bits -- logic valued vector contains 0 and 1 of the decoded
+%bits
+
+%% you need to write your own code to do DBPSK decoding
+
+phasechange=data(1:end-1).*conj(data(2:end));
+raw_bits=(abs(angle(phasechange))>pi/2);
+
+end
+
+
+%file end
+
+%File start decoding_main.m
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Enlarged baseband signal');
+    
+    fprintf('\n Showing magnitude of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% Step 2: Despread the baseband signal
+barker_25 = [+1, +1, -1, -1, +1, +1, +1, +1, +1, -1, -1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1]'; %25 point barker code
+
+
+
+% calculate the correlation of the barker code
+% You should fillin your own code here
+corr_result = conv(baseband_data,barker_25(end:-1:1));
+
+if(interactive)
+    figure
+    plot(real(corr_result(2e5+200:2e5+400))); %plot the enlarged real part
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Correlation results');
+    
+    fprintf('\n Showing correlation result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+% Find out the peaks in the correlation
+% You should fillin your own code here
+data_length=floor(length(corr_result)/25);
+
+%reshape the matrix to 25*data size
+sha|.T..F%.:e.U...J...k........Pbt...........TdjRXdjX...........Rv.J....@...@.....@..@...@...@.........X..........z...P...P...........RX..XbRv...........z`tdjtP...........ZbRTdjv...............z...........P.........V.........Rv....P...........R.@@@@.......@@@@....P...P.............Pbth.hRRRv@J....@...@..........@@@@......PN......@......NRv.@@@@......PN.........NRv.@@@@.....PN.........@..@..........@......NRv.@@@@.@@@@.......PN..@.......@..........@......@..@...@........@........NRv.@@@@.......PNPaused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+%% Step 3: Finding the start and ending of the frame
+
+frame_boundary = find_frame_boundary( despread_data );
+
+if(interactive)
+    fprintf('\n Found %d frames\n',size(frame_boundary,2));
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% loop over every frame to decode them
+
+% You may add preparation code here
+
+filename='myframes.pcap';
+
+write_pcap_header(filename);
+
+for frame=1:size(frame_boundary,2)
+    fprintf('\n Decoding frame %d\n',frame);
+    frame_data=despread_data(frame_boundary(1,frame):frame_boundary(2,frame));
+
+    % Step 4: Decode the DBPSK signal
+    raw_bits = decode_dbpsk(frame_data);
+    
+    % Step 5: Descramble the raw bits to get the real bits
+    frame_bits = descramble (raw_bits);
+    
+    % Step 6: Find the SYNC and remove them
+    sfd_start = find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge detector to find sharp edges
+thr=conv(abs(data),filter2)*0.8; % the threshod determined by moving average
+
+posedge=(sign(temp-thr)+1)/2; % find the postive edge, magnitude jump up
+negedge=-(sign(temp+thr)-1)/2; % find the negative edge, magnitude jump down
+pos=find(posedge);
+neg=find(negedge);
+j=1;
+pstart=1;
+pend=1;
+f_boundary=zeros(2,1);
+% scan posedge and negative edge to find boundaries
+while (pstart<size(pos,2) && pend<size(neg,2))  
+    while(neg(pend)<pos(pstart) && pend<size(neg,2))
+        pend=pend+1;
+    end
+    %only,g.n..-\	...\.`.n.A"......@b```@.....@@@@..P...P....RZ...P......R|b```LL...P......VbRZ...P......R|b```LL...P......VbR|...P....RR.@@@@@@@@..........PbX.Rz...P......RV......P......Rv@.@@@@@@@@..........PdX.Rz...P....RZ......P......Rv.@@@@@@@@.z.Vbv.@@@@....@@@@......z......Vbv.....J......@...@.....@.....@...@....@.....X@...@..@.......@.................z..........PtXdt...ZbRv....J....@.....@.............\..........@.........@z@.............P....R.J........@.............t@....@...@........@..@...@.....@.....J.....t@....@@...........@...@.........J......t@.........t@...@........@..@...@.....@...@...X@..@......@....@....J@@@@@@@@@@@@@@@@@@@...X@...@.........z`................zd``v.JJ@...@......@.....@....@...@....@..@....@...@.................zbv......P........xmax_headersize)
+    index=find(data(position:end)==1,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    position=position+index;
+    index=find(data(position:end)==0,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    if(index>100)
+        position=position+index-1;
+        break;
+    end
+end
+if(position<max_headersize)
+    sfd_start=position;
+else
+    sfd_start=0;
+end
+
+end
+
+%file end
+
+%File start load_baseband
+function [count,baseband]=load_baseband(filename,start,num)
+%load the uint16 USRP rx_sample_to_file dumpfile
+%input:
+%  -filename: the dumpfile
+%  -start: the number of samples to skip at the start
+%  -num: the number of samples to read, use inf if read all data
+%output:
+%  -count: the number of read samples
+%  -loadtrace16: the complex sample data;
+
+fd=fopen(filename,'r');
+fseek(fd,start*4,-1);
+temp=fread(fd,[2 num],'*int16');
+baseband=complex(double(temp(1,:)),double(temp(2,:)));
+count=length(baseband);
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_frame
+function write_pcap_frame(filename,data,offset)
+% Write the bit stream into the filename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrit..g.SZ.T. ...d.|.w#...fd.+q........zdv........zhv.......P..X.......XN....blNRv.......P..X.......XN....blNRv..........z`v.......P..X.........XN....fdNRv........z`v.......P..X.......XN....fdNRv........zfdnlp.......P..X.......XN....fdNRv........zb`j.......P..X.......XN....fdNRv.......P..Rv........J....@.......J....@.....@..........\..........@......z...........P....R.J@........@...........t@......@....@..@...@........J@.....t@....t@...@.....J@......t@......t@...@..........@...@........JJ@...@....@.....@....@...@....@............z..v....@.zbtpt.....P......P....R^pRTp.@@@@......z....d...P...P....P.t.VnR\TPd\.P`tnRRRXdR@.......v.........J....@.....J....@.....@............\..........@........z............P....R.J........@............t@......@...@.......@....@...@........@......@..@..J......@......J.....t@....@@ZZ@.......@......@........@.......J......t@........@ZZ@.....@......@......@........@`@...@b@..@...@........J......JJ@...@....@..@.....@....@...@....@..@..@.....@.....................z....Pbt...ZbR\T....P....Pdt...RRv.........zP...P.....P...........RR|..^dRv........J....@.....J....@.....@.............\..JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Enlarged baseband signal');
+    
+    fprintf('\n Showing magnitude of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% Step 2: Despread the baseband signal
+barker_25 = [+1, +1, -1, -1, +1, +1, +1, +1, +1, -1, -1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1]'; %25 point barker code
+
+
+
+% calculate the correlation of the barker code
+% You should fillin your own code here
+corr_result = conv(baseband_data,barker_25(end:-1:1));
+
+if(interactive)
+    figure
+    plot(real(corr_result(2e5+200:2e5+400))); %plot the enlarged real part
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Correlation results');
+    
+    fprintf('\n Showing correlation result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+% Find out the peaks in the correlation
+% You should fillin your own code here
+data_length=floor(length(corr_result)/25);
+
+%reshape the matrix to 25*data size
+shaped_corr=reshape(corr_result(1:data_length*25),25,data_length);
+%find the index of the max values
+[~,max_index]=max(abs(shaped_corr),[],1);
+
+col_index=0:25:(data_length-1)*25;
+
+despread_data=corr_result(max_index+col_index);
+
+if(interactive)
+    figure
+    plot(abs(despread_data(1:4e4))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of despreaded signal');
+    
+    fprintf('\n Showing despreaded result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+%% Step 3: Finding the start and ending of the frame
+
+frame_boundary = find_frame_boundary( despread_data );
+
+if(interactive)
+    fprintf('\n Found %d frames\n',size(frame_boundary,2));
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% loop over every frame to decode them
+
+% You may add preparation code here
+
+filename='myframes.pcap';
+
+write_pcap_header(filename);
+
+for frame=1:size(frame_boundary,2)
+    fprintf('\n Decoding frame %d\n',frame);
+    frame_data=despread_data(frame_boundary(1,frame):frame_boundary(2,frame));
+
+    % Step 4: Decode the DBPSK signal
+    raw_bits = decode_dbpsk(frame_data);
+    
+    % Step 5: Descramble the raw bits to get the real bits
+    frame_bits = descramble (raw_bits);
+    
+    % Step 6: Find the SYNC and remove them
+    sfd_start = find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge detector to find sharp edges
+thr=conv(abs(data),filter2)*0.8; % the threshod determined by moving average
+
+posedge=(sign(temp-thr)+1)/2; % find the postive edge, magnitude jump up
+negedge=-(sign(temp+thr)-1)/2; % find the negative edge, magnitude jump down
+pos=find(posedge);
+neg=find(negedge);
+j=1;
+pstart=1;
+pend=1;
+f_boundary=zeros(2,1);
+% scan posedge and negative edge to find boundaries
+while (pstart<size(pos,2) && pend<size(neg,2))  
+    while(neg(pend)<pos(pstart) && pend<size(neg,2))
+        pend=pend+1;
+    end
+    %only retain frames longer than 1000 bits
+    if(neg(pend)-pos(pstart)>1000&&pos(pstart+1)-pos(pstart)>1000&&pos(pstart+1)>neg(pend))
+        f_boundary(1,j)=pos(pstart)+length(filter); 
+        f_boundary(2,j)=neg(pend)-length(filter);
+        j=j+1;
+    end
+    pstart=pstart+1;
+end
+%remove the first frame and la..@.~..J.j...@D...........................z..........PtXdt...ZbRv....J....@.....@.............\..........@.........@z@.............P....R.J........@.............t@....@...@........@..@...@.....@.....J.....t@....@@...........@...@.........J......t@.........t@...@........@..@...@.....@...@...X@..@......@....@....J@@@@@@@@@@@@@@@@@@@...X@...@.........z`................zd``v.JJ@...@......@.....@....@...@....@..@....@...@.................zbv......P........x..............R.@@@@.....z....P....P........t...RzzbXbXN.....NRv.@@@@..P.......P.....RR.@@@@@@@@........z..............Vbv.@@@@@@@@.....v.@@@@....@@@@........z........V.....v.@@@@.....z....P....P........t...Rzz`XbXN.....NRv.@@@@..P.......P.....RR.@@@@@@@@......on=max_headersize+1;
+        break;
+    end
+    if(index>100)
+        position=position+index-1;
+        break;
+    end
+end
+if(position<max_headersize)
+    sfd_start=position;
+else
+    sfd_start=0;
+end
+
+end
+
+%file end
+
+%File start load_baseband
+function [count,baseband]=load_baseband(filename,start,num)
+%load the uint16 USRP rx_sample_to_file dumpfile
+%input:
+%  -filename: the dumpfile
+%  -start: the number of samples to skip at the start
+%  -num: the number of samples to read, use inf if read all data
+%output:
+%  -count: the number of read samples
+%  -loadtrace16: the complex sample data;
+
+fd=fopen(filename,'r');
+fseek(fd,start*4,-1);
+temp=fread(fd,[2 num],'*int16');
+baseband=complex(double(temp(1,:)),double(temp(2,:)));
+count=length(baseband);
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_frame
+function write_pcap_frame(filename,data,offset)
+% Write the bit stream into the filename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrite(fd,magicnumber,'uint32');
+v_major=2;
+v_minor=4;
+fwrite(fd,v_major,'uint16');
+fwrite(fd,v_minor,'uint16');
+this_zone=0;
+fwrite(fd,this_zone,'uint32');
+sigfigs=0;
+fwrite(fd,sigfigs,'uint32');
+snaplen=32768
+fwrite(fd,snaplen,'uint32');
+network=105
+fwrite(fd,network,'uint32');
+fclose(fd);
+
+
+end
+
+%file end
+
+%file start bitohexstr.m
+function result=bittohexstr(data)
+% function bittohexstr: change bits to hex strings
+% input: data: raw bits
+% output: result: the Captalized HEX result
+
+%% you must write your own code here
+
+result=[];
+for i=1:8:floor(length(data)/8)*8
+    result=[dec2hex(sum(data(i:i+7).*(2.^(0:7))),2) result];
+end
+end
+%file end
+
+%File start decode_dbpsk.m
+function raw_bits=decode_dbpsk(data)
+%function decode_dbpsk: decode the rawbits from the despread signal of a
+%single frame
+%input: data  -- complex valued despread signal
+%output: raw_bits -- logic valued vector contains 0 and 1 of the decoded
+%bits
+
+%% you need to write your own code to do DBPSK decoding
+
+phasechange=data(1:end-1).*conj(data(2:end));
+raw_bits=(abs(angle(phasechange))>pi/2);
+
+end
+
+
+%file end
+
+%File start decoding_main.m
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Enlarged baseband signal');
+    
+    fprintf('\n Showing magnitude of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% Step 2: Despread the baseband signal
+barker_25 = [+1, +1, -1, -1, +1, +1, +1, +1, +1, -1, -1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1]'; %25 point barker code
+
+
+
+% calculate the correlation of the barker code
+% You should fillin your own code here
+corr_result = conv(baseband_data,barker_25(end:-1:1));
+
+if(interactive)
+    figure
+    plot(real(corr_result(2e5+200:2e5+400))); %plot the enlarged real part
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Correlation results');
+    
+    fprintf('\n Showing correlation result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+% Find out the peaks in the correlation
+% You should fillin your own code here
+data_length=floor(length(corr_result)/25);
+
+%reshape the matrix to 25*data size
+shaped_corr=reshape(corr_result(1:data_length*25),25,data_length);
+%find the index of the max values
+[~,max_index]=max(abs(shaped_corr),[],1);
+
+col_index=0:25:(data_length-1)*25;
+
+despread_data=corr_result(max_index+col_index);
+
+if(interactive)
+    figure
+    plot(abs(despread_data(1:4e4))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of despreaded signal');
+    
+    fprintf('\n Showing despreaded result of the baseband signal\n');
+    fprintf('Paused, press any key to co..Y...^l.l...;..$.C# ."N......NRv.@@@@.....v.....JJ@....@ft@.......@...@.....@...@......@..@...@.....................@z@...................P@.............@Rv....P...........R.@@@@.......PN..@.....@J.@........NX....P..............XdRRv.@@@@.......PN......X@.....@...@...@..@........@..@...@....Z.@..@......NRv.@@@@.....v......JJ@....@....@.....@.....@..@......@......J@...@...@...@...........@....@..............zN........\....Nv...................P........Rv.....@.....zbt....P..............XdR.@@  fprintf('\n Decoding frame %d\n',frame);
+    frame_data=despread_data(frame_boundary(1,frame):frame_boundary(2,frame));
+
+    % Step 4: Decode the DBPSK signal
+    raw_bits = decode_dbpsk(frame_data);
+    
+    % Step 5: Descramble the raw bits to get the real bits
+    frame_bits = descramble (raw_bits);
+    
+    % Step 6: Find the SYNC and remove them
+    sfd_start = find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge detector to find sharp edges
+thr=conv(abs(data),filter2)*0.8; % the threshod determined by moving average
+
+posedge=(sign(temp-thr)+1)/2; % find the postive edge, magnitude jump up
+negedge=-(sign(temp+thr)-1)/2; % find the negative edge, magnitude jump down
+pos=find(posedge);
+neg=find(negedge);
+j=1;
+pstart=1;
+pend=1;
+f_boundary=zeros(2,1);
+% scan posedge and negative edge to find boundaries
+while (pstart<size(pos,2) && pend<size(neg,2))  
+    while(neg(pend)<pos(pstart) && pend<size(neg,2))
+        pend=pend+1;
+    end
+    %only retain frames longer than 1000 bits
+    if(neg(pend)-pos(pstart)>1000&&pos(pstart+1)-pos(pstart)>1000&&pos(pstart+1)>neg(pend))
+        f_boundary(1,j)=pos(pstart)+length(filter); 
+        f_boundary(2,j)=neg(pend)-length(filter);
+        j=j+1;
+    end
+    pstart=pstart+1;
+end
+%remove the first frame and last frame, may be partial frames
+f_boundary=f_boundary(:,2:end-1);
+end%File start find_preamble.m
+function sfd_start = find_preamble(data)
+%function find_preamble: find the preamble in the frame data
+%input: data  descrambled bit sequence
+%output: sfd_start: the poistion of the first sfd bit, if cannot find the
+%                   sfd, set sfd_start=0
+
+max_headersize=200;
+%% You should write your own code to find the preamble
+position=1;
+while(position<max_headersize)
+    index=find(data(position:end)==1,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    position=position+index;
+    index=find(data(position:end)==0,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    if(index>100)
+        position=position+index-1;
+        break;
+    end
+end
+if(position<max_headersize)
+    sfd_start=position;
+else
+    sfd_start=0;
+end
+
+end
+
+%file end
+
+%File start load_baseband
+function [count,baseband]=load_baseband(filename,start,num)
+%load the uint16 USRP rx_sample_to_file dumpfile
+%input:
+%  -filename: the dumpfile
+%  -start: the number of samples to skip at the start
+%  -num: the number of samples to read, use inf if read all data
+%output:
+%  -count: the number of read samples
+%  -loadtrace16: the complex sample data;
+
+fd=fopen(filename,'r');
+fseek(fd,start*4,-1);
+temp=fread(fd,[2 num],'*int16');
+baseband=complex(double(temp(1,:)),double(temp(2,:)));
+count=length(baseband);
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_frame
+function write_pcap_frame(filename,data,offset)
+% Write the bit stream into the filename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrite(fd,magicnumber,'uint32');
+v_major=2;
+v_minor=4;
+fwrite(fd,v_major,'uint16');
+fwrite(fd,v_minor,'uint16');
+this_zone=0;
+fwrite(fd,this_zone,'uint32');
+sigfigs=0;
+fwrite(fd,sigfigs,'uint32');
+snaplen=32768
+fwrite(fd,snaplen,'uint32');
+network=105
+fwrite(fd,network,'uint32');
+fclose(fd);
+
+
+end
+
+%file end
+
+%file start bitohexstr.m
+function result=bittohexstr(data)
+% function bittohexstr: change bits to hex strings
+% input: data: raw bits
+% output: result: the Captalized HEX result
+
+%% you must write your own code here
+
+result=[];
+for i=1:8:floor(length(data)/8)*8
+    result=[dec2hex(sum(data(i:i+7).*(2.^(0:7))),2) result];
+end
+end
+%file end
+
+%File start decode_dbpsk.m
+function raw_bits=decode_dbpsk(data)
+%function decode_dbpsk: decode the rawbits from the despread signal of a
+%single frame
+%input: data  -- complex valued despread signal
+%output: raw_bits -- logic valued vector contains 0 and 1 of the decoded
+%bits
+
+%% you need to write your own code to do DBPSK decoding
+
+phasechange=data(1:end-1).*conj(data(2:end));
+raw_bits=(abs(angle(phasechange))>pi/2);
+
+end
+
+
+%file end
+
+%File start decoding_main.m
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Enlarged baseband signal');
+    
+    fprintf('\n Showing magnitude of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% Step 2: Despread the baseband signal
+barker_25 = [+1, +1, -1, -1, +1, +1, +1, +1, +1, -1, -1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1]'; %25 point barker code
+
+
+
+% calculate the correlation of the barker code
+% You should fillin your own code here
+corr_result = conv(baseband_data,barker_25(end:-1:1));
+
+if(interactive)
+    figure
+    plot(real(corr_result(2e5+200:2e5+400))); %plot the enlarged real part
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Correlation results');
+    
+    fprintf('\n Showing correlation result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+% Find out the peaks in the correlation
+% You should fillin your own code here
+data_length=floor(length(corr_result)/25);
+
+%reshape the matrix to 25*data size
+shaped_corr=reshape(corr_result(1:data_length*25),25,data_length);
+%find the index of the max values
+[~,max_index]=max(abs(shaped_corr),[],1);
+
+col_index=0:25:(data_length-1)*25;
+
+despread_data=corr_result(max_index+col_index);
+
+if(interactive)
+    figure
+    plot(abs(despread_data(1:4e4))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of despreaded signal');
+    
+    fprintf('\n Showing despreaded result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+%% Step 3: Finding the start and ending of the frame
+
+frame_boundary = find_frame_boundary( despread_data );
+
+if(interactive)
+    fprintf('\n Found %d frames\n',size(frame_boundary,2));
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% loop over every frame to decode them
+
+% You may add preparation code here
+
+filename='myframes.pcap';
+
+write_pcap_header(filename);
+
+for frame=1:size(frame_boundary,2)
+    fprintf('\n Decoding frame %d\n',frame);
+    frame_data=despread_data(frame_boundary(1,frame):frame_boundary(2,frame));
+
+    % Step 4: Decode the DBPSK signal
+    raw_bits = decode_dbpsk(frame_data);
+    
+    % Step 5: Descramble the raw bits to get the real bits
+    frame_bits = descramble (raw_bits);
+    
+    % Step 6: Find the SYNC and remove them
+    sfd_start = find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge detector to find sharp edges
+thr=conv(abs(data),filter2)*0.8; % the threshod determined by moving average
+
+posedge=(sign(temp-thr)+1)/2; % find the postive edge, magnitude jump up
+negedge=-(sign(temp+thr)-1)/2; % find the negative edge, magnitude jump down
+pos=find(posedge);
+neg=find(negedge);
+j=1;
+pstart=1;
+pend=1;
+f_boundary=zeros(2,1);
+% scan posedge and negative edge to find boundaries
+while (pstart<size(pos,2) && pend<size(neg,2))  
+    while(neg(pend)<pos(pstart) && pend<size(neg,2))
+        pend=pend+1;
+    end
+    %only retain frames longer than 1000 bits
+    if(neg(pend)-pos(pstart)>1000&&pos(pstart+1)-pos(pstart)>1000&&pos(pstart+1)>neg(pend))
+        f_boundary(1,j)=pos(pstart)+length(filter); 
+        f_boundary(2,j)=neg(pend)-length(filter);
+        j=j+1;
+    end
+    pstart=pstart+1;
+end
+%remove the first frame and last frame, may be partial frames
+f_boundary=f_boundary(:,2:end-1);
+end%File start find_preamble.m
+function sfd_start = find_preamble(data)
+%function find_preamble: find the preamble in the frame data
+%input: data  descrambled bit sequence
+%output: sfd_start: the poistion of the first sfd bit, if cannot find the
+%                   sfd, set sfd_start=0
+
+max_headersize=200;
+%% You should write your own code to find the preamble
+position=1;
+while(position<max_headersize)
+    index=find(data(position:end)==1,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    position=position+index;
+    index=find(data(position:end)==0,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    if(index>100)
+        position=position+index-1;
+        break;
+    end
+end
+if(position<max_headersize)
+    sfd_start=position;
+else
+    sfd_start=0;
+end
+
+end
+
+%file end
+
+%File start load_baseband
+function [count,baseband]=load_baseband(filename,start,num)
+%load the uint16 USRP rx_sample_to_file dumpfile
+%input:
+%  -filename: the dumpfile
+%  -start: the number of samples to skip at the start
+%  -num: the number of samples to read, use inf if read all data
+%output:
+%  -count: the number of read samples
+%  -loadtrace16: the complex sample data;
+
+fd=fopen(filename,'r');
+fseek(fd,start*4,-1);
+temp=fread(fd,[2 num],'*int16');
+baseband=complex(double(temp(1,:)),double(temp(2,:)));
+count=length(baseband);
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_frame
+function write_pcap_frame(filename,data,offset)
+% Write the bit stream into the filename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrite(fd,magicnumber,'uint32');
+v_major=2;
+v_minor=4;
+fwrite(fd,v_major,'uint16');
+fwrite(fd,v_minor,'uint16');
+this_zone=0;
+fwrite(fd,this_zone,'uint32');
+sigfigs=0;
+fwrite(fd,sigfigs,'uint32');
+snaplen=32768
+fwrite(fd,snaplen,'uint32');
+network=105
+fwrite(fd,network,'uint32');
+fclose(fd);
+
+
+end
+
+%file end
+
+
+
+%file start bitohexstr.m
+function result=bittohexstr(data)
+% function bittohexstr: change bits to hex strings
+% input: data: raw bits
+% output: result: the Captalized HEX result
+
+%% you must write your own code here
+
+result=[];
+for i=1:8:floor(length(data)/8)*8
+    result=[dec2hex(sum(data(i:i+7).*(2.^(0:7))),2) result];
+end
+end
+%file end
+
+%File start decode_dbpsk.m
+function raw_bits=decode_dbpsk(data)
+%function decode_dbpsk: decode the rawbits from the despread signal of a
+%single frame
+%input: data  -- complex valued despread signal
+%output: raw_bits -- logic valued vector contains 0 and 1 of the decoded
+%bits
+
+%% you need to write your own code to do DBPSK decoding
+
+phasechange=data(1:end-1).*conj(data(2:end));
+raw_bits=(abs(angle(phasechange))>pi/2);
+
+end
+
+
+%file end
+
+%File start decoding_main.m
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Enlarged baseband signal');
+    
+    fprintf('\n Showing magnitude of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% Step 2: Despread the baseband signal
+barker_25 = [+1, +1, -1, -1, +1, +1, +1, +1, +1, -1, -1, +1, +1, +1, +1, +1, +1, +1, -1, -1, -1, -1, -1, -1, -1]'; %25 point barker code
+
+
+
+% calculate the correlation of the barker code
+% You should fillin your own code here
+corr_result = conv(baseband_data,barker_25(end:-1:1));
+
+if(interactive)
+    figure
+    plot(real(corr_result(2e5+200:2e5+400))); %plot the enlarged real part
+    xlabel('Sample points');
+    ylabel('Real part');
+    title('Correlation results');
+    
+    fprintf('\n Showing correlation result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+% Find out the peaks in the correlation
+% You should fillin your own code here
+data_length=floor(length(corr_result)/25);
+
+%reshape the matrix to 25*data size
+shaped_corr=reshape(corr_result(1:data_length*25),25,data_length);
+%find the index of the max values
+[~,max_index]=max(abs(shaped_corr),[],1);
+
+col_index=0:25:(data_length-1)*25;
+
+despread_data=corr_result(max_index+col_index);
+
+if(interactive)
+    figure
+    plot(abs(despread_data(1:4e4))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of despreaded signal');
+    
+    fprintf('\n Showing despreaded result of the baseband signal\n');
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+%% Step 3: Finding the start and ending of the frame
+
+frame_boundary = find_frame_boundary( despread_data );
+
+if(interactive)
+    fprintf('\n Found %d frames\n',size(frame_boundary,2));
+    fprintf('Paused, press any key to continue or use Ctrl-C to stop\n');
+    pause;
+end
+
+%% loop over every frame to decode them
+
+% You may add preparation code here
+
+filename='myframes.pcap';
+
+write_pcap_header(filename);
+
+for frame=1:size(frame_boundary,2)
+    fprintf('\n Decoding frame %d\n',frame);
+    frame_data=despread_data(frame_boundary(1,frame):frame_boundary(2,frame));
+
+    % Step 4: Decode the DBPSK signal
+    raw_bits = decode_dbpsk(frame_data);
+    
+    % Step 5: Descramble the raw bits to get the real bits
+    frame_bits = descramble (raw_bits);
+    
+    % Step 6: Find the SYNC and remove them
+    sfd_start = find_preamble(frame_bits);
+    
+    if(sfd_start==0)
+        fprintf('preamble not found\n');
+        continue;
+    end
+    
+    %Step 7 Check SFD sequence
+    sfd_data=bittohexstr(frame_bits(sfd_start:sfd_start+15));
+    if(strcmp(sfd_data,'F3A0'))
+        fprintf('SFD found = %s\n', sfd_data);
+    else
+        fprintf('SFD not found \n');
+    end
+    
+    %Step 7 Check SIGNAL
+    signal_data=bittohexstr(frame_bits(sfd_start+16:sfd_start+23));
+    if(strcmp(signal_data,'0A'))
+        fprintf('Singal = %s, rate 1M OK \n', signal_data);
+    else
+        fprintf('Singal =%s, rate wrong \n', signal_data);
+        continue;
+    end
+
+    %Step 8 Print out service, length and CRC
+    fprintf('Service =%s, length= %s, CRC= %s \n', ...
+        bittohexstr(frame_bits(sfd_start+24:sfd_start+31)), ...
+        bittohexstr(frame_bits(sfd_start+32:sfd_start+47)), ...
+        bittohexstr(frame_bits(sfd_start+48:sfd_start+63)));
+    
+    %Step 9 Get MPDU
+    mpdu_start=sfd_start+64;
+    % you need to write your own code to interperate the MPDU
+    write_pcap_frame(filename,frame_bits(mpdu_start:end),frame_boundary(1,frame));
+    
+    
+end
+
+
+%file end
+
+%File start descramble.m
+function frame_bits = descramble(raw_bits)
+% function descramble: descramble the bits using LSFR
+% input: raw_bits -- raw bits after DBPSK
+% output: frame_bits -- real transmitted bits for the frame
+
+frame_bits= xor(raw_bits(8:end),xor(raw_bits(4:end-4),raw_bits(1:end-7)));
+end
+
+%file end
+
+function f_boundary = find_frame_boundary( data )
+% function find_frame_bounary, find the boundary of the frames by magnitude
+% changes
+%input: data -- despreaded data
+%output: 
+%   f_boundary -- the start and ending points of the frames in a 2*n
+%                 matrix,n is the number of detected frames, the first row
+%                 is the starting point, the second row is the ending point
+
+if(length(data)<1e3)
+    f_boundary=[];
+    return
+end
+
+filter=[1 1 1 -1  -1 -1]; % edge detector
+filter2=[1 1 1 1 1 1]; % moving average
+
+temp=conv(abs(data),filter);   % use the edge detector to find sharp edges
+thr=conv(abs(data),filter2)*0.8; % the threshod determined by moving average
+
+posedge=(sign(temp-thr)+1)/2; % find the postive edge, magnitude jump up
+negedge=-(sign(temp+thr)-1)/2; % find the negative edge, magnitude jump down
+pos=find(posedge);
+neg=find(negedge);
+j=1;
+pstart=1;
+pend=1;
+f_boundary=zeros(2,1);
+% scan posedge and negative edge to find boundaries
+while (pstart<size(pos,2) && pend<size(neg,2))  
+    while(neg(pend)<pos(pstart) && pend<size(neg,2))
+        pend=pend+1;
+.b..... !._Nf....R.. ...,......@......@....@b```@.....@@@@..P...P....RZ...P......R|b```LL...P......VbRZ...P......R|b```LL...P......VbR|...P....RR.@@@@@@@@..........PbX.Rz...P......RV......P......Rv@.@@@@@@@@..........PdX.Rz...P....RZ......P......Rv.@@@@@@@@.z.Vbv.@@@@....@@@@......z......Vbv.....J......@...@.....@.....@...@....@.....X@...@..@.......@.................z..........PtXdt...ZbRv....J....@.....@.......eamble.m
+function sfd_start = find_preamble(data)
+%function find_preamble: find the preamble in the frame data
+%input: data  descrambled bit sequence
+%output: sfd_start: the poistion of the first sfd bit, if cannot find the
+%                   sfd, set sfd_start=0
+
+max_headersize=200;
+%% You should write your own code to find the preamble
+position=1;
+while(position<max_headersize)
+    index=find(data(position:end)==1,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    position=position+index;
+    index=find(data(position:end)==0,1,'first');
+    if(isempty(index))
+        position=max_headersize+1;
+        break;
+    end
+    if(index>100)
+        position=position+index-1;
+        break;
+    end
+end
+if(position<max_headersize)
+    sfd_start=position;
+else
+    sfd_start=0;
+end
+
+end
+
+%file end
+
+%File start load_baseband
+function [count,baseband]=load_baseband(filename,start,num)
+%load the uint16 USRP rx_sample_to_file dumpfile
+%input:
+%  -filename: the dumpfile
+%  -start: the number of samples to skip at the start
+%  -num: the number of samples to read, use inf if read all data
+%output:
+%  -count: the number of read samples
+%  -loadtrace16: the complex sample data;
+
+fd=fopen(filename,'r');
+fseek(fd,start*4,-1);
+temp=fread(fd,[2 num],'*int16');
+baseband=complex(double(temp(1,:)),double(temp(2,:)));
+count=length(baseband);
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_frame
+function write_pcap_frame(filename,data,offset)
+% Write the bit stream into the filename
+
+fd=fopen(filename,'a+');
+ts_sec=0;
+fwrite(fd,ts_sec,'uint32');
+fwrite(fd,offset,'uint32');
+data_size=floor(length(data)/8);
+fwrite(fd,data_size,'uint32');
+fwrite(fd,data_size,'uint32');
+
+for i=1:8:floor(length(data)/8)*8
+    onebyte=sum(data(i:i+7).*(2.^(0:7)));
+    fwrite(fd,onebyte,'uint8');
+end
+
+fclose(fd);
+end
+
+%file end
+
+%File start write_pcap_header.m
+function write_pcap_header( filename )
+% write a pcap header to the sepecified file name
+
+fd=fopen(filename,'w+');
+magicnumber=hex2dec('A1B2C3D4');
+fwrite(fd,magicnumber,'uint32');
+v_major=2;
+v_minor=4;
+fwrite(fd,v_major,'uint16');
+fwrite(fd,v_minor,'uint16');
+this_zone=0;
+fwrite(fd,this_zone,'uint32');
+sigfigs=0;
+fwrite(fd,sigfigs,'uint32');
+snaplen=32768
+fwrite(fd,snaplen,'uint32');
+network=105
+fwrite(fd,network,'uint32');
+fclose(fd);
+
+
+end
+
+%file end
+
+
+
+%file start bitohexstr.m
+function result=bittohexstr(data)
+% function bittohexstr: change bits to hex strings
+% input: data: raw bits
+% output: result: the Captalized HEX result
+
+%% you must write your own code here
+
+result=[];
+for i=1:8:floor(length(data)/8)*8
+    result=[dec2hex(sum(data(i:i+7).*(2.^(0:7))),2) result];
+end
+end
+%file end
+
+%File start decode_dbpsk.m
+function raw_bits=decode_dbpsk(data)
+%function decode_dbpsk: decode the rawbits from the despread signal of a
+%single frame
+%input: data  -- complex valued despread signal
+%output: raw_bits -- logic valued vector contains 0 and 1 of the decoded
+%bits
+
+%% you need to write your own code to do DBPSK decoding
+
+phasechange=data(1:end-1).*conj(data(2:end));
+raw_bits=(abs(angle(phasechange))>pi/2);
+
+end
+
+
+%file end
+
+%File start decoding_main.m
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  Baseband decoding experiment main script
+%  Nanjing University Dislab
+%  Author: Wei Wang, Lei Wang
+%  Date: 2016/1/30
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+% switch to turn off the interactive part
+
+interactive=0;
+
+%% Step 1: Load the dump file from USRP Software radio
+filename='lab5.dat'; %filename of the baseband
+[num_samples,baseband_data]=load_baseband(filename,0,inf); %read all data in the file
+
+if(interactive)
+    figure
+    plot(abs(baseband_data(1:1e6))); %plot the magnitude
+    xlabel('Sample points');
+    ylabel('Magnitude');
+    title('Magnitude of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5:2.1e5))); %plot the real and imaginary part
+    hold on
+    plot(imag(baseband_data(2e5:2.1e5)),'r');
+    xlabel('Sample points');
+    ylabel('Real/imaginary part');
+    legend('Real','Imaginary');
+    title('Complex values of baseband signal');
+    
+    figure
+    plot(real(baseband_data(2e5+200:2e5+400))); %plot the enlarged real
+    xlabel('Sample points');
+    ylabel('Real part');
+    title
